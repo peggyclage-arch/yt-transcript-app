@@ -1,13 +1,23 @@
 //! YouTube transcript fetching, the way `youtube-transcript-api` does it.
 //!
-//! No API key, no login: load the watch page, pull `ytInitialPlayerResponse`
-//! out of it, take the caption track list, and download the chosen track as
-//! JSON3. Manual captions are preferred over auto-generated ones (`kind =
-//! "asr"`), and the requested language is preferred over English.
+//! No API key of our own, no login: ask YouTube's InnerTube player API
+//! (ANDROID client, the same public key `youtube-transcript-api` uses) for
+//! the video's caption track list, then download the chosen track as JSON3.
+//! Manual captions are preferred over auto-generated ones (`kind = "asr"`),
+//! and the requested language is preferred over English.
+//!
+//! Why InnerTube and not the watch page: the caption URLs in a scraped watch
+//! page are unsigned, and YouTube answers those timedtext requests with an
+//! empty 200. The player API returns signed URLs (expire + signature) that
+//! actually serve the track. The track URL already carries `fmt=srv3`, so the
+//! format has to be *replaced* with `fmt=json3`, not appended — a duplicate
+//! fmt parameter makes YouTube honour the first one and return XML.
 
 use serde::{Deserialize, Serialize};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const INNERTUBE_KEY: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+const INNERTUBE_URL: &str = "https://www.youtube.com/youtubei/v1/player";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,9 +75,10 @@ impl std::fmt::Display for TranscriptError {
                 f,
                 "This video has no captions in any language. Use \"Transcribe audio (Whisper)\" instead."
             ),
-            TranscriptError::ParseFailed(e) => {
-                write!(f, "YouTube changed its page format and I couldn't read it: {e}")
-            }
+            TranscriptError::ParseFailed(e) => write!(
+                f,
+                "YouTube changed its format and I couldn't read it: {e}"
+            ),
         }
     }
 }
@@ -116,51 +127,6 @@ fn http_client() -> reqwest::Client {
         .expect("reqwest client builds")
 }
 
-/// Pull the `ytInitialPlayerResponse = {...};` JSON object out of a watch page.
-fn extract_player_response(html: &str) -> Result<serde_json::Value, TranscriptError> {
-    let key = "ytInitialPlayerResponse";
-    let start = html
-        .find(key)
-        .ok_or_else(|| TranscriptError::ParseFailed("no ytInitialPlayerResponse".into()))?;
-    let after = &html[start + key.len()..];
-    let brace = after
-        .find('{')
-        .ok_or_else(|| TranscriptError::ParseFailed("no player JSON object".into()))?;
-    let json_start = start + key.len() + brace;
-    let bytes = html.as_bytes();
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut escaped = false;
-    let mut end = None;
-    for (i, &b) in bytes.iter().enumerate().skip(json_start) {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(i + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let end = end.ok_or_else(|| TranscriptError::ParseFailed("unbalanced player JSON".into()))?;
-    serde_json::from_str(&html[json_start..end])
-        .map_err(|e| TranscriptError::ParseFailed(e.to_string()))
-}
-
 fn decode_entities(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -192,14 +158,24 @@ pub struct FetchedPage {
     pub tracks: Vec<(String, CaptionTrack)>, // (base_url, track)
 }
 
-/// Load the watch page and list every caption track it offers.
-pub async fn list_caption_tracks(
-    video_id: &str,
-) -> Result<FetchedPage, TranscriptError> {
-    let url = format!("https://www.youtube.com/watch?v={video_id}&hl=en");
+/// Ask the InnerTube player API for a video's caption tracks.
+pub async fn list_caption_tracks(video_id: &str) -> Result<FetchedPage, TranscriptError> {
+    let url = format!("{INNERTUBE_URL}?key={INNERTUBE_KEY}&prettyPrint=false");
+    let body = serde_json::json!({
+        "context": {
+            "client": {
+                "clientName": "ANDROID",
+                "clientVersion": "20.10.38",
+                "hl": "en",
+                "gl": "US",
+            }
+        },
+        "videoId": video_id,
+    });
     let resp = http_client()
-        .get(&url)
-        .header("Accept-Language", "en-US,en;q=0.9")
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&body)
         .send()
         .await
         .map_err(|e| TranscriptError::FetchFailed(e.to_string()))?;
@@ -210,12 +186,11 @@ pub async fn list_caption_tracks(
     if !resp.status().is_success() {
         return Err(TranscriptError::VideoUnavailable);
     }
-    let html = resp
-        .text()
+    let player: serde_json::Value = resp
+        .json()
         .await
-        .map_err(|e| TranscriptError::FetchFailed(e.to_string()))?;
+        .map_err(|e| TranscriptError::ParseFailed(e.to_string()))?;
 
-    let player = extract_player_response(&html)?;
     let playability = player
         .pointer("/playabilityStatus/status")
         .and_then(|v| v.as_str())
@@ -289,8 +264,25 @@ fn pick_track<'a>(
             return Some(t);
         }
     }
-    tracks.iter().find(|(_, tr)| !tr.is_auto_generated)
+    tracks
+        .iter()
+        .find(|(_, tr)| !tr.is_auto_generated)
         .or_else(|| tracks.first())
+}
+
+/// The track URL already carries `fmt=srv3`. Replace it with `fmt=json3` —
+/// appending a second fmt parameter makes YouTube honour the first and
+/// return XML instead of JSON.
+fn with_json3_format(url: &str) -> String {
+    if let Some(pos) = url.find("fmt=") {
+        let after = &url[pos + 4..];
+        let end = after.find('&').map(|i| pos + 4 + i).unwrap_or(url.len());
+        format!("{}fmt=json3{}", &url[..pos], &url[end..])
+    } else if url.contains('?') {
+        format!("{url}&fmt=json3")
+    } else {
+        format!("{url}?fmt=json3")
+    }
 }
 
 /// Fetch the full transcript for a video URL. `lang` is a language code
@@ -304,8 +296,7 @@ pub async fn fetch_transcript(url: &str, lang: &str) -> Result<Transcript, Trans
     let (base_url, track) = pick_track(&page.tracks, lang).ok_or(TranscriptError::NoCaptions)?;
     let base_url = base_url.clone();
     let track = track.clone();
-    // json3 gives timestamped segments; baseUrl already carries its query string.
-    let track_url = format!("{base_url}&fmt=json3");
+    let track_url = with_json3_format(&base_url);
     let resp = http_client()
         .get(&track_url)
         .send()
@@ -364,7 +355,11 @@ pub async fn fetch_transcript(url: &str, lang: &str) -> Result<Transcript, Trans
 /// Render the transcript exactly like the `.md` files I save: header + timestamped lines.
 pub fn render_markdown(t: &Transcript, source_url: &str, source_label: &str) -> String {
     let mut out = String::new();
-    let title = if t.title.is_empty() { "YouTube transcript" } else { &t.title };
+    let title = if t.title.is_empty() {
+        "YouTube transcript"
+    } else {
+        &t.title
+    };
     out.push_str(&format!("# {title}\n"));
     out.push_str(&format!("# {source_url}\n"));
     out.push_str(&format!(
