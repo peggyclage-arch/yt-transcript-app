@@ -14,6 +14,25 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Download Whisper sidecar tools
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+          # yt-dlp (direct exe, ~24 MB)
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "src-tauri/resources/yt-dlp.exe"
+          # ffmpeg, essentials build (~80 MB zip) — find the exe wherever the zip puts it
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "$env:TEMP/ffmpeg.zip"
+          Expand-Archive -Path "$env:TEMP/ffmpeg.zip" -DestinationPath "$env:TEMP/ffmpeg" -Force
+          $ffmpegExe = Get-ChildItem -Path "$env:TEMP/ffmpeg" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName "src-tauri/resources/ffmpeg.exe"
+          # whisper.cpp v1.7.6 (pinned: later releases dropped whisper-bin-x64.zip)
+          Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/download/v1.7.6/whisper-bin-x64.zip" -OutFile "$env:TEMP/whisper.zip"
+          Expand-Archive -Path "$env:TEMP/whisper.zip" -DestinationPath "$env:TEMP/whisper" -Force
+          $whisperExe = Get-ChildItem -Path "$env:TEMP/whisper" -Recurse -Filter "whisper-cli.exe" | Select-Object -First 1
+          Copy-Item $whisperExe.FullName "src-tauri/resources/whisper.exe"
+          Copy-Item "$($whisperExe.DirectoryName)/ggml-base.dll","$($whisperExe.DirectoryName)/ggml-cpu.dll","$($whisperExe.DirectoryName)/ggml.dll","$($whisperExe.DirectoryName)/whisper.dll" "src-tauri/resources/"
+          Get-ChildItem src-tauri/resources | Select-Object Name, Length
+
       - name: Build the Windows app
         uses: tauri-apps/tauri-action@v0
         env:
