@@ -1,7 +1,14 @@
 pub mod transcript;
 pub mod whisper;
 
+use tauri::Manager;
 use transcript::{CaptionTrack, Transcript};
+
+/// Where the installer put the bundled sidecar tools (yt-dlp, ffmpeg,
+/// whisper), if it kept them apart from the exe.
+fn resource_dirs(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
+    app.path().resource_dir().ok().into_iter().collect()
+}
 
 #[tauri::command]
 async fn fetch_transcript(url: String, lang: String) -> Result<Transcript, String> {
@@ -21,13 +28,22 @@ async fn list_tracks(url: String) -> Result<Vec<CaptionTrack>, String> {
 }
 
 #[tauri::command]
-fn check_tools() -> whisper::ToolsStatus {
-    whisper::check_tools()
+fn check_tools(app: tauri::AppHandle) -> whisper::ToolsStatus {
+    whisper::check_tools(&resource_dirs(&app))
 }
 
 #[tauri::command]
-async fn transcribe_audio(url: String, lang: String) -> Result<Transcript, String> {
-    whisper::transcribe_audio(&url, &lang).await
+async fn transcribe_audio(
+    app: tauri::AppHandle,
+    url: String,
+    lang: String,
+) -> Result<Transcript, String> {
+    let dirs = resource_dirs(&app);
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    whisper::transcribe_audio(&url, &lang, &dirs, &data_dir).await
 }
 
 /// Open the save dialog and write the transcript as a .md file.

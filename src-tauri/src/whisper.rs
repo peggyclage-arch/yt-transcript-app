@@ -13,8 +13,9 @@ pub struct ToolsStatus {
     pub whisper: bool,
 }
 
-fn find_binary(name: &str) -> Option<std::path::PathBuf> {
-    // 1. Next to the app's .exe (portable sidecars).
+fn find_binary(name: &str, extra_dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    // 1. Next to the app's .exe (portable sidecars, or tools bundled by the
+    //    installer as resources — on Windows they land beside the exe).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for cand in [format!("{name}.exe"), name.to_string()] {
@@ -25,7 +26,17 @@ fn find_binary(name: &str) -> Option<std::path::PathBuf> {
             }
         }
     }
-    // 2. On PATH.
+    // 2. In the app's resource dir (where the installer puts bundled tools
+    //    if it keeps them apart from the exe).
+    for dir in extra_dirs {
+        for cand in [format!("{name}.exe"), name.to_string()] {
+            let p = dir.join(&cand);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    // 3. On PATH.
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
             for cand in [format!("{name}.exe"), name.to_string()] {
@@ -39,11 +50,11 @@ fn find_binary(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-pub fn check_tools() -> ToolsStatus {
+pub fn check_tools(extra_dirs: &[std::path::PathBuf]) -> ToolsStatus {
     ToolsStatus {
-        yt_dlp: find_binary("yt-dlp").is_some(),
-        ffmpeg: find_binary("ffmpeg").is_some(),
-        whisper: find_binary("whisper").is_some(),
+        yt_dlp: find_binary("yt-dlp", extra_dirs).is_some(),
+        ffmpeg: find_binary("ffmpeg", extra_dirs).is_some(),
+        whisper: find_binary("whisper", extra_dirs).is_some(),
     }
 }
 
@@ -80,16 +91,15 @@ struct WhisperTimestamps {
 const TINY_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin";
 
-fn model_path() -> std::path::PathBuf {
-    let base = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("models").join("ggml-tiny.bin")
+/// The model lives in the app's data dir (writable by a normal user), not
+/// next to the exe — an MSI install lands in Program Files, which a
+/// standard user cannot write to.
+fn model_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("models").join("ggml-tiny.bin")
 }
 
-async fn ensure_model() -> Result<std::path::PathBuf, String> {
-    let path = model_path();
+async fn ensure_model(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = model_path(data_dir);
     if path.is_file() {
         return Ok(path);
     }
@@ -108,17 +118,24 @@ async fn ensure_model() -> Result<std::path::PathBuf, String> {
 
 /// Download audio with yt-dlp and transcribe it with whisper.cpp.
 /// Returns a Transcript shaped exactly like the captions path.
-pub async fn transcribe_audio(url: &str, lang: &str) -> Result<Transcript, String> {
+/// `extra_dirs` are extra places to look for the sidecar tools (the app's
+/// resource dir); `data_dir` is where the Whisper model is kept.
+pub async fn transcribe_audio(
+    url: &str,
+    lang: &str,
+    extra_dirs: &[std::path::PathBuf],
+    data_dir: &std::path::Path,
+) -> Result<Transcript, String> {
     let video_id = crate::transcript::extract_video_id(url)
         .ok_or_else(|| "That doesn't look like a YouTube video link.".to_string())?;
-    let ytdlp = find_binary("yt-dlp")
+    let ytdlp = find_binary("yt-dlp", extra_dirs)
         .ok_or_else(|| "yt-dlp is not installed. Put yt-dlp.exe next to this app or on your PATH.".to_string())?;
-    let whisper = find_binary("whisper")
+    let whisper = find_binary("whisper", extra_dirs)
         .ok_or_else(|| "whisper.cpp is not installed. Put whisper.exe next to this app or on your PATH.".to_string())?;
-    if find_binary("ffmpeg").is_none() {
+    if find_binary("ffmpeg", extra_dirs).is_none() {
         return Err("ffmpeg is not installed — yt-dlp needs it to extract audio. Put ffmpeg.exe next to this app or on your PATH.".into());
     }
-    let model = ensure_model().await?;
+    let model = ensure_model(data_dir).await?;
     let title = crate::transcript::list_caption_tracks(&video_id)
         .await
         .map(|p| p.title)

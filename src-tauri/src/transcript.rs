@@ -127,6 +127,19 @@ fn http_client() -> reqwest::Client {
         .expect("reqwest client builds")
 }
 
+/// Format a reqwest error with its full cause chain, so a failure on the
+/// user's PC says *what* failed (DNS lookup, connection, TLS certificate)
+/// instead of just "error sending request".
+fn describe_reqwest_error(e: &reqwest::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        parts.push(s.to_string());
+        src = std::error::Error::source(s);
+    }
+    parts.join(": ")
+}
+
 fn decode_entities(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -178,7 +191,7 @@ pub async fn list_caption_tracks(video_id: &str) -> Result<FetchedPage, Transcri
         .json(&body)
         .send()
         .await
-        .map_err(|e| TranscriptError::FetchFailed(e.to_string()))?;
+        .map_err(|e| TranscriptError::FetchFailed(describe_reqwest_error(&e)))?;
 
     if resp.status().as_u16() == 429 {
         return Err(TranscriptError::RateLimited);
@@ -301,14 +314,14 @@ pub async fn fetch_transcript(url: &str, lang: &str) -> Result<Transcript, Trans
         .get(&track_url)
         .send()
         .await
-        .map_err(|e| TranscriptError::FetchFailed(e.to_string()))?;
+        .map_err(|e| TranscriptError::FetchFailed(describe_reqwest_error(&e)))?;
     if resp.status().as_u16() == 429 {
         return Err(TranscriptError::RateLimited);
     }
     let body = resp
         .text()
         .await
-        .map_err(|e| TranscriptError::FetchFailed(e.to_string()))?;
+        .map_err(|e| TranscriptError::FetchFailed(describe_reqwest_error(&e)))?;
     let json3: Json3 =
         serde_json::from_str(&body).map_err(|e| TranscriptError::ParseFailed(e.to_string()))?;
 
