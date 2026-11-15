@@ -1,6 +1,6 @@
 [package]
 name = "yt-transcript"
-version = "0.1.1"
+version = "0.1.2"
 description = "Small Tauri Windows app: fetch a YouTube video's transcript from captions, or transcribe its audio with Whisper when there are no captions."
 authors = ["Soufian El Habibe"]
 edition = "2021"
