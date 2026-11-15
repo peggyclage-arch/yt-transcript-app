@@ -14,21 +14,27 @@ pub struct ToolsStatus {
 }
 
 fn find_binary(name: &str, extra_dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    // 1. Next to the app's .exe (portable sidecars, or tools bundled by the
-    //    installer as resources — on Windows they land beside the exe).
+    // Where to look, in order. The MSI installer puts bundled tools in a
+    // `resources` subfolder of the install dir (NOT next to the exe), so
+    // every base dir is also searched with `/resources` appended — that was
+    // the v0.1.1 bug: whisper.exe sat in <install>\resources while the app
+    // only looked next to the exe, so it reported whisper.cpp missing even
+    // though the installer shipped it.
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    // 1. Next to the app's .exe (portable sidecars), and its resources subfolder.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for cand in [format!("{name}.exe"), name.to_string()] {
-                let p = dir.join(&cand);
-                if p.is_file() {
-                    return Some(p);
-                }
-            }
+            dirs.push(dir.to_path_buf());
+            dirs.push(dir.join("resources"));
         }
     }
-    // 2. In the app's resource dir (where the installer puts bundled tools
-    //    if it keeps them apart from the exe).
-    for dir in extra_dirs {
+    // 2. The app's resource dir (where the installer puts bundled tools),
+    //    and its resources subfolder.
+    for d in extra_dirs {
+        dirs.push(d.clone());
+        dirs.push(d.join("resources"));
+    }
+    for dir in &dirs {
         for cand in [format!("{name}.exe"), name.to_string()] {
             let p = dir.join(&cand);
             if p.is_file() {

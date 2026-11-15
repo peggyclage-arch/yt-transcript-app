@@ -10,11 +10,37 @@ fn resource_dirs(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
     app.path().resource_dir().ok().into_iter().collect()
 }
 
+/// Get transcript: captions first (instant), and if that fails — no network
+/// to YouTube, rate-limited, no captions at all — fall back to the same
+/// yt-dlp + Whisper route used for the Mega course videos: download the
+/// audio and transcribe it locally. One button, it just works.
 #[tauri::command]
-async fn fetch_transcript(url: String, lang: String) -> Result<Transcript, String> {
-    transcript::fetch_transcript(&url, &lang)
-        .await
-        .map_err(|e| e.to_string())
+async fn fetch_transcript(
+    app: tauri::AppHandle,
+    url: String,
+    lang: String,
+) -> Result<Transcript, String> {
+    match transcript::fetch_transcript(&url, &lang).await {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            let fallback = matches!(
+                &e,
+                transcript::TranscriptError::FetchFailed(_)
+                    | transcript::TranscriptError::RateLimited
+                    | transcript::TranscriptError::NoCaptions
+                    | transcript::TranscriptError::ParseFailed(_)
+            );
+            if !fallback {
+                return Err(e.to_string());
+            }
+            let dirs = resource_dirs(&app);
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir());
+            whisper::transcribe_audio(&url, &lang, &dirs, &data_dir).await
+        }
+    }
 }
 
 #[tauri::command]

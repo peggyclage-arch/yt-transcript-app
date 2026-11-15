@@ -122,7 +122,7 @@ pub fn extract_video_id(url: &str) -> Option<String> {
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("reqwest client builds")
 }
