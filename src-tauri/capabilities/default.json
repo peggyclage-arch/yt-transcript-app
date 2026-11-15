@@ -1,0 +1,1 @@
+{"$schema":"https://schema.tauri.app/config/2/capabilities/default.json","description":"Default capabilities: core window APIs and the save-file dialog.","identifier":"default","permissions":["core:default","dialog:allow-save"],"windows":["main"]}
