@@ -1,7 +1,6 @@
 pub mod transcript;
 pub mod whisper;
 
-use tauri::Manager;
 use transcript::{CaptionTrack, Transcript};
 
 #[tauri::command]
