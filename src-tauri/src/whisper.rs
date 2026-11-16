@@ -164,21 +164,41 @@ pub async fn transcribe_audio(
 
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<Transcript, String> {
         let audio_out = workdir.join("audio.%(ext)s");
-        let dl = std::process::Command::new(&ytdlp)
-            .args([
+        // YouTube bot-checks anonymous yt-dlp downloads on some networks
+        // ("Sign in to confirm you're not a bot" — Boss hit this on
+        // v0.1.4). Same idea as the Mega-course downloads: download
+        // authenticated, with the user's own YouTube session. yt-dlp reads
+        // the cookies straight out of the browser, so try each browser in
+        // turn and fall back to no cookies if none has a usable session.
+        // A browser that isn't installed (or has no YouTube cookies) fails
+        // fast at startup, before any download starts.
+        let mut last_err = String::new();
+        let mut downloaded = false;
+        for browser in [Some("chrome"), Some("edge"), Some("firefox"), None] {
+            let mut cmd = std::process::Command::new(&ytdlp);
+            cmd.args([
                 "-f", "bestaudio",
                 "--extract-audio",
                 "--audio-format", "wav",
                 "--audio-quality", "0",
                 "-o", audio_out.to_str().unwrap_or("audio.%(ext)s"),
                 "--no-playlist",
-                &url,
-            ])
-            .output()
-            .map_err(|e| format!("Could not run yt-dlp: {e}"))?;
-        if !dl.status.success() {
-            let err = String::from_utf8_lossy(&dl.stderr);
-            return Err(format!("yt-dlp failed to download the audio: {}", tail(&err, 500)));
+            ]);
+            if let Some(browser) = browser {
+                cmd.args(["--cookies-from-browser", browser]);
+            }
+            let dl = cmd
+                .arg(&url)
+                .output()
+                .map_err(|e| format!("Could not run yt-dlp: {e}"))?;
+            if dl.status.success() {
+                downloaded = true;
+                break;
+            }
+            last_err = String::from_utf8_lossy(&dl.stderr).into_owned();
+        }
+        if !downloaded {
+            return Err(format!("yt-dlp failed to download the audio: {}", tail(&last_err, 500)));
         }
         let audio = workdir.join("audio.wav");
         if !audio.is_file() {
