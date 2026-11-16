@@ -97,6 +97,25 @@ struct WhisperTimestamps {
 const TINY_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin";
 
+/// On Windows, child console programs (yt-dlp, whisper) open a visible
+/// Terminal window when spawned. CREATE_NO_WINDOW keeps them hidden — the
+/// app's own window is the only thing the user should see. Boss saw that
+/// empty Terminal pop up during the Whisper fallback on v0.1.5.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn hide_console(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 /// The model lives in the app's data dir (writable by a normal user), not
 /// next to the exe — an MSI install lands in Program Files, which a
 /// standard user cannot write to.
@@ -176,6 +195,7 @@ pub async fn transcribe_audio(
         let mut downloaded = false;
         for browser in [Some("chrome"), Some("edge"), Some("firefox"), None] {
             let mut cmd = std::process::Command::new(&ytdlp);
+            hide_console(&mut cmd);
             cmd.args([
                 "-f", "bestaudio",
                 "--extract-audio",
@@ -196,24 +216,59 @@ pub async fn transcribe_audio(
                 break;
             }
             last_err = String::from_utf8_lossy(&dl.stderr).into_owned();
+            let out = String::from_utf8_lossy(&dl.stdout);
+            if !out.trim().is_empty() {
+                last_err.push_str("\n--- stdout ---\n");
+                last_err.push_str(&out);
+            }
         }
         if !downloaded {
-            return Err(format!("yt-dlp failed to download the audio: {}", tail(&last_err, 500)));
+            // Save the full tool output so a failed download can be
+            // diagnosed instead of guessed at — v0.1.5 only showed the last
+            // 500 characters of stderr.
+            let log = workdir.join("yt-dlp.log");
+            let _ = std::fs::write(&log, &last_err);
+            return Err(format!(
+                "yt-dlp failed to download the audio (full log: {}): {}",
+                log.display(),
+                tail(&last_err, 1000)
+            ));
         }
         let audio = workdir.join("audio.wav");
-        if !audio.is_file() {
-            return Err("yt-dlp finished but no audio.wav was produced.".into());
+        let audio_bytes = std::fs::metadata(&audio).map(|m| m.len()).unwrap_or(0);
+        if !audio.is_file() || audio_bytes == 0 {
+            return Err(format!(
+                "yt-dlp finished but audio.wav is missing or empty ({} bytes).",
+                audio_bytes
+            ));
         }
         let out_base = workdir.join("out");
         let mut cmd = std::process::Command::new(&whisper);
+        hide_console(&mut cmd);
         cmd.args(["-m", model.to_str().unwrap_or(""), "-f", audio.to_str().unwrap_or(""), "-oj", "-of", out_base.to_str().unwrap_or("out")]);
         if lang != "auto" && !lang.is_empty() {
             cmd.args(["-l", &lang]);
         }
         let run = cmd.output().map_err(|e| format!("Could not run whisper: {e}"))?;
         if !run.status.success() {
-            let err = String::from_utf8_lossy(&run.stderr);
-            return Err(format!("whisper failed: {}", tail(&err, 500)));
+            // v0.1.5 showed only the last 500 chars of stderr — the
+            // whisper.cpp init log — so the real failure was invisible.
+            // Keep the whole output in a log file and show the audio size,
+            // so the next failure can be diagnosed from the app alone.
+            let mut err = String::from_utf8_lossy(&run.stderr).into_owned();
+            let out = String::from_utf8_lossy(&run.stdout);
+            if !out.trim().is_empty() {
+                err.push_str("\n--- stdout ---\n");
+                err.push_str(&out);
+            }
+            let log = workdir.join("whisper.log");
+            let _ = std::fs::write(&log, &err);
+            return Err(format!(
+                "whisper failed (audio.wav: {} bytes, full log: {}): {}",
+                audio_bytes,
+                log.display(),
+                tail(&err, 1000)
+            ));
         }
         let json_path = workdir.join("out.json");
         let raw = std::fs::read_to_string(&json_path)
