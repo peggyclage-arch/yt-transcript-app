@@ -27,6 +27,7 @@ async fn fetch_transcript(
                 &e,
                 transcript::TranscriptError::FetchFailed(_)
                     | transcript::TranscriptError::RateLimited
+                    | transcript::TranscriptError::VideoUnavailable
                     | transcript::TranscriptError::NoCaptions
                     | transcript::TranscriptError::ParseFailed(_)
             );

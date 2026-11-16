@@ -197,7 +197,13 @@ pub async fn list_caption_tracks(video_id: &str) -> Result<FetchedPage, Transcri
         return Err(TranscriptError::RateLimited);
     }
     if !resp.status().is_success() {
-        return Err(TranscriptError::VideoUnavailable);
+        // A failed HTTP response is a network problem, not a removed video.
+        // v0.1.3 wrongly reported this as "video can't be opened" for a
+        // public video with captions, because the request itself failed.
+        return Err(TranscriptError::FetchFailed(format!(
+            "YouTube answered HTTP {} to the player request",
+            resp.status()
+        )));
     }
     let player: serde_json::Value = resp
         .json()
