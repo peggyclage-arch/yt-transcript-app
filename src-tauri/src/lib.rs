@@ -58,6 +58,13 @@ fn check_tools(app: tauri::AppHandle) -> whisper::ToolsStatus {
     whisper::check_tools(&resource_dirs(&app))
 }
 
+/// The app's own version, shown in the header so you can always tell which
+/// build you are running.
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[tauri::command]
 async fn transcribe_audio(
     app: tauri::AppHandle,
@@ -106,6 +113,7 @@ pub fn run() {
             fetch_transcript,
             list_tracks,
             check_tools,
+            app_version,
             transcribe_audio,
             save_transcript
         ])

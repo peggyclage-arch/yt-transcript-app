@@ -112,7 +112,17 @@ async fn ensure_model(data_dir: &std::path::Path) -> Result<std::path::PathBuf, 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let bytes = reqwest::get(TINY_MODEL_URL)
+    // The model download used to have no timeout at all: if the connection
+    // to HuggingFace stalled, the app sat on the spinner forever (Boss hit
+    // this on v0.1.2). 120s is generous for a 75 MB file; a stall now fails
+    // with a clear error instead of hanging.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Could not download the Whisper tiny model: {e}"))?;
+    let bytes = client
+        .get(TINY_MODEL_URL)
+        .send()
         .await
         .map_err(|e| format!("Could not download the Whisper tiny model: {e}"))?
         .bytes()
